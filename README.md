@@ -53,10 +53,12 @@ listeners:
     dns-listen: 127.0.0.1:1053
     local:
       enabled: true
+      ipv6: false
       dns-mode: hijack
       bypass-private-address: true
     shared:
       enabled: true
+      ipv6: false
       dns-mode: hijack
       interface: ["wlan1"]
       bypass-private-address: true
