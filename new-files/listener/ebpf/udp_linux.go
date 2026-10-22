@@ -5,6 +5,7 @@ package ebpf
 import (
 	"net"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,17 +49,57 @@ func (s *udpSession) lastSeenTime() time.Time {
 	return time.Unix(0, s.lastSeen.Load())
 }
 
-// closeLocked releases library resources of the session. The
-// caller must hold Manager.sessionsMu.
-func (m *Manager) closeSessionLocked(session *udpSession) {
+// idleTimeout is how long the session may stay silent before the
+// janitor releases it; hijacked-DNS sessions are short-lived.
+func (s *udpSession) idleTimeout() time.Duration {
+	if s.dnsConn != nil {
+		return dnsTimeout
+	}
+	return udpTimeout
+}
+
+// sessionRelease holds what must be freed when a session ends, so
+// the (syscall-heavy) release can run outside sessionsMu.
+type sessionRelease struct {
+	dnsConn  *net.UDPConn
+	bindings []*replyBinding
+	flow     *commonEBPF.SharedPacketRewriteFlowHandle
+}
+
+// dnsBufferPool recycles the 64 KiB read buffers of the DNS relay
+// loops instead of allocating one per hijacked-DNS session.
+var dnsBufferPool = sync.Pool{
+	New: func() any {
+		buffer := make([]byte, 65535)
+		return &buffer
+	},
+}
+
+// detachSessionLocked marks the session closed and returns what
+// must be released. The caller must hold sessionsMu (write). It
+// returns nil when the session was already closed.
+func (m *Manager) detachSessionLocked(session *udpSession) *sessionRelease {
 	if session.closed {
-		return
+		return nil
 	}
 	session.closed = true
-	if session.dnsConn != nil {
-		session.dnsConn.Close()
-	}
+	release := &sessionRelease{dnsConn: session.dnsConn, flow: session.flow}
 	for _, binding := range session.bindings {
+		release.bindings = append(release.bindings, binding)
+	}
+	return release
+}
+
+// releaseSession frees library resources of a detached session.
+// It does not need sessionsMu.
+func (m *Manager) releaseSession(release *sessionRelease) {
+	if release == nil {
+		return
+	}
+	if release.dnsConn != nil {
+		release.dnsConn.Close()
+	}
+	for _, binding := range release.bindings {
 		if binding.flow != nil {
 			if backend := m.sharedBackend(); backend != nil {
 				_ = backend.ReleaseFlow(binding.flow)
@@ -69,32 +110,61 @@ func (m *Manager) closeSessionLocked(session *udpSession) {
 				netip.AddrPortFrom(binding.redirect, m.port))
 		}
 	}
-	if session.flow != nil {
+	if release.flow != nil {
 		if backend := m.sharedBackend(); backend != nil {
-			_ = backend.ReleaseFlow(session.flow)
+			_ = backend.ReleaseFlow(release.flow)
 		}
 	}
 }
 
+// closeSessionLocked detaches and releases a session while the
+// caller holds sessionsMu. The janitor uses expireSessions instead,
+// which releases outside the lock.
+func (m *Manager) closeSessionLocked(session *udpSession) {
+	m.releaseSession(m.detachSessionLocked(session))
+}
+
+// expireSessions drops sessions idle past their timeout. Detaching
+// happens under the lock; the BPF map/syscall cleanup runs after it
+// is released so packets are not stalled behind it.
+func (m *Manager) expireSessions(now time.Time) {
+	var expired []*sessionRelease
+	m.sessionsMu.Lock()
+	for key, session := range m.sessions {
+		if now.Sub(session.lastSeenTime()) > session.idleTimeout() {
+			expired = append(expired, m.detachSessionLocked(session))
+			delete(m.sessions, key)
+		}
+	}
+	m.sessionsMu.Unlock()
+	for _, release := range expired {
+		m.releaseSession(release)
+	}
+}
 
 // handleUDPPacket processes one datagram that arrived at the
 // shared listener with the given token destination.
 func (m *Manager) handleUDPPacket(payload []byte, client, tokenDst netip.AddrPort) {
 	key := udpKey{client: client, token: tokenDst}
-	m.sessionsMu.Lock()
+	m.sessionsMu.RLock()
 	session, ok := m.sessions[key]
+	m.sessionsMu.RUnlock()
 	if !ok {
-		var err error
-		session, err = m.newSessionLocked(key)
-		if err != nil {
-			m.sessionsMu.Unlock()
-			return
+		m.sessionsMu.Lock()
+		session, ok = m.sessions[key]
+		if !ok {
+			var err error
+			session, err = m.newSessionLocked(key)
+			if err != nil {
+				m.sessionsMu.Unlock()
+				return
+			}
+			m.sessions[key] = session
 		}
-		m.sessions[key] = session
+		m.sessionsMu.Unlock()
 	}
 	session.touch()
 	dnsConn := session.dnsConn
-	m.sessionsMu.Unlock()
 
 	if dnsConn != nil {
 		_, _ = dnsConn.Write(payload)
@@ -160,26 +230,38 @@ func (m *Manager) newSessionLocked(key udpKey) (*udpSession, error) {
 // dnsRelayLoop forwards DNS answers back to the client with the
 // reply binding of the original DNS server address.
 func (m *Manager) dnsRelayLoop(session *udpSession) {
-	buffer := make([]byte, 65535)
+	bufferPtr := dnsBufferPool.Get().(*[]byte)
+	defer dnsBufferPool.Put(bufferPtr)
+	buffer := *bufferPtr
+	var binding *replyBinding
 	for {
 		n, err := session.dnsConn.Read(buffer)
 		if err != nil {
 			return
 		}
-		payload := make([]byte, n)
-		copy(payload, buffer[:n])
 		session.touch()
-		binding, err := m.sessionBinding(session, session.origDst)
-		if err != nil {
-			continue
+		if binding == nil {
+			b, err := m.sessionBinding(session, session.origDst)
+			if err != nil {
+				continue
+			}
+			binding = b
 		}
-		_ = m.writeUDPReply(session.key.client, binding.packetInfo, payload)
+		// The write is synchronous (the kernel copies the data), so
+		// the pooled buffer can be sent directly without a copy.
+		_ = m.writeUDPReply(session.key.client, binding.packetInfo, buffer[:n])
 	}
 }
 
 // sessionBinding returns (creating on first use) the reply
 // binding that makes replies appear to come from source.
 func (m *Manager) sessionBinding(session *udpSession, source netip.AddrPort) (*replyBinding, error) {
+	m.sessionsMu.RLock()
+	existing, found := session.bindings[source]
+	m.sessionsMu.RUnlock()
+	if found {
+		return existing, nil
+	}
 	m.sessionsMu.Lock()
 	defer m.sessionsMu.Unlock()
 	if binding, ok := session.bindings[source]; ok {
