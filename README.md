@@ -135,3 +135,16 @@ CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -tags with_ebpf \
 - **Kredit & lisensi:** library sing-ebpf karya **CHIZI-0618**
   (GPLv3, sama seperti mihomo). Kit ini cuma memindahkannya ke
   mihomo.
+
+## Perubahan v4.1 (perbaikan loading awal)
+
+- **Sesi DNS hijack singkat:** sesi UDP yang ke DNS ditutup setelah 15 detik
+  diam (sebelumnya 5 menit), jadi socket, goroutine, dan entri map BPF tidak
+  menumpuk saat banyak domain di-resolve sekaligus. Janitor jalan tiap 5 detik.
+- **Buffer DNS dipakai ulang:** buffer 64 KiB per sesi DNS diganti `sync.Pool`,
+  dan jawaban DNS dikirim langsung tanpa salin ulang.
+- **Lock UDP lebih ringan:** `sessionsMu` jadi `RWMutex`; jalur paket biasa
+  hanya `RLock`, dan pembersihan sesi kedaluwarsa dilakukan di luar lock.
+- **Loop baca UDP aman:** socket tertutup menghentikan loop; error lain diberi
+  jeda 10 ms supaya tidak memutar CPU 100%. `acceptLoop` juga diberi jeda.
+- Buang alokasi `UDPAddr` yang tidak terpakai di setiap balasan UDP.
