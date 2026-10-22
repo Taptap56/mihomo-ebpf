@@ -1,0 +1,52 @@
+name: Build mihomo android-arm64 + ebpf listener (v1.19.32)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kit ini
+        uses: actions/checkout@v4
+        with:
+          path: kit
+
+      - name: Checkout mihomo resmi v1.19.32
+        uses: actions/checkout@v4
+        with:
+          repository: MetaCubeX/mihomo
+          ref: v1.19.32
+          path: mihomo
+
+      - name: Setup Go 1.25.5
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+          cache: false
+
+      - name: Apply kit eBPF
+        working-directory: mihomo
+        run: |
+          cp -r ../kit/new-files ../kit/ebpf.patch ../kit/apply-ebpf.sh .
+          sh apply-ebpf.sh
+
+      - name: Ambil library sing-ebpf (CHIZI-0618)
+        working-directory: mihomo
+        run: |
+          go get github.com/CHIZI-0618/sing-ebpf@v0.1.0-alpha.13
+          GOFLAGS=-tags=with_ebpf go mod tidy
+
+      - name: Build android/arm64 (with_ebpf, tanpa strip)
+        working-directory: mihomo
+        run: |
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -tags with_ebpf -trimpath \
+            -ldflags "-X github.com/metacubex/mihomo/constant.Version=v1.19.32" \
+            -o mihomo-android-arm64 .
+          ls -la mihomo-android-arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-android-arm64-ebpf-1.19.32
+          path: mihomo/mihomo-android-arm64
