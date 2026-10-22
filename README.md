@@ -54,11 +54,13 @@ listeners:
     local:
       enabled: true
       ipv6: false
+      quic: drop
       dns-mode: hijack
       bypass-private-address: true
     shared:
       enabled: true
       ipv6: false
+      quic: drop
       dns-mode: hijack
       interface: ["wlan1"]
       bypass-private-address: true
