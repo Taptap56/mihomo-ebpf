@@ -40,7 +40,14 @@ const (
 	defaultDNSListen  = "127.0.0.1:1053"
 	defaultCgroupPath = "/sys/fs/cgroup"
 	udpTimeout        = 5 * time.Minute
+	// dnsTimeout is the idle lifetime of a hijacked-DNS session. DNS
+	// clients usually use a socket once, so keeping each one for the
+	// full udpTimeout only piles up sockets, goroutines and BPF map
+	// entries while a page/app resolves dozens of names.
+	dnsTimeout        = 15 * time.Second
 	reconcileInterval = 5 * time.Second
+	janitorInterval   = 5 * time.Second
+	sweepInterval     = 30 * time.Second
 )
 
 var (
@@ -103,7 +110,7 @@ type Manager struct {
 	udp4 *net.UDPConn
 	udp6 *net.UDPConn
 
-	sessionsMu sync.Mutex
+	sessionsMu sync.RWMutex
 	sessions   map[udpKey]*udpSession
 
 	ctx    chan struct{}
@@ -430,23 +437,21 @@ func (m *Manager) sharedBackend() *commonEBPF.SharedPacketRewriteBackend {
 
 func (m *Manager) janitor() {
 	defer m.wg.Done()
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(janitorInterval)
 	defer ticker.Stop()
+	sweepEvery := int(sweepInterval / janitorInterval)
+	tick := 0
 	for {
 		select {
 		case <-m.ctx:
 			return
 		case now := <-ticker.C:
-			m.sessionsMu.Lock()
-			for key, session := range m.sessions {
-				if now.Sub(session.lastSeenTime()) > udpTimeout {
-					m.closeSessionLocked(session)
-					delete(m.sessions, key)
+			m.expireSessions(now)
+			tick++
+			if sweepEvery > 0 && tick%sweepEvery == 0 {
+				if backend := m.sharedBackend(); backend != nil {
+					_, _ = backend.SweepOrphanedFlows(udpTimeout, 256)
 				}
-			}
-			m.sessionsMu.Unlock()
-			if backend := m.sharedBackend(); backend != nil {
-				_, _ = backend.SweepOrphanedFlows(udpTimeout, 256)
 			}
 		}
 	}
