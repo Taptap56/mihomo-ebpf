@@ -3,9 +3,11 @@
 package ebpf
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"time"
 
 	"github.com/metacubex/mihomo/log"
 	"golang.org/x/net/ipv4"
@@ -64,7 +66,12 @@ func (m *Manager) acceptLoop(listener net.Listener) {
 				return
 			default:
 			}
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				// e.g. EMFILE: back off briefly instead of spinning.
+				time.Sleep(5 * time.Millisecond)
 				continue
 			}
 			return
@@ -100,10 +107,8 @@ func (m *Manager) readLoop4() {
 	for {
 		n, cm, src, err := pc.ReadFrom(buffer)
 		if err != nil {
-			select {
-			case <-m.ctx:
+			if m.readStopped(err) {
 				return
-			default:
 			}
 			continue
 		}
@@ -129,10 +134,8 @@ func (m *Manager) readLoop6() {
 	for {
 		n, cm, src, err := pc.ReadFrom(buffer)
 		if err != nil {
-			select {
-			case <-m.ctx:
+			if m.readStopped(err) {
 				return
-			default:
 			}
 			continue
 		}
@@ -150,14 +153,29 @@ func (m *Manager) readLoop6() {
 	}
 }
 
+// readStopped reports whether a UDP read loop must exit: the
+// listener is shutting down or the socket is closed. Any other
+// error backs off briefly so a persistent failure cannot spin a CPU
+// core at 100%.
+func (m *Manager) readStopped(err error) bool {
+	select {
+	case <-m.ctx:
+		return true
+	default:
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	time.Sleep(10 * time.Millisecond)
+	return false
+}
+
 // writeUDPReply sends payload to client through the socket of the
 // client's family, with the packet info that makes the reply carry
 // the binding's redirect (token) source address.
 func (m *Manager) writeUDPReply(client netip.AddrPort, packetInfo []byte, payload []byte) error {
-	dst := net.UDPAddrFromAddrPort(client)
 	if client.Addr().Is4() {
 		_, _, err := m.udp4.WriteMsgUDPAddrPort(payload, packetInfo, client)
-		_ = dst
 		return err
 	}
 	if m.udp6 == nil {
