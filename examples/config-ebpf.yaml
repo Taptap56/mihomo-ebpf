@@ -1,0 +1,21 @@
+# Contoh config mihomo dengan listener "ebpf" (kit v4).
+# Potongan yang relevan cuma seksi listeners: — sisanya config
+# mihomo biasa. Di TaptapClash, entri listeners ini ditempel di
+# config override (menggantikan seksi ebpf: lama dari kit v3).
+
+listeners:
+  - name: ebpf-in
+    type: ebpf
+    port: 15361
+    dns-listen: 127.0.0.1:1053
+    local:
+      enabled: true
+      dns-mode: hijack
+      bypass-private-address: true
+    shared:
+      enabled: true
+      dns-mode: hijack
+      interface: ["wlan1"]
+      bypass-private-address: true
+
+# ... proxies / proxy-groups / rules seperti biasa ...
