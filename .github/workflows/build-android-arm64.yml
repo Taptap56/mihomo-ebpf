@@ -1,7 +1,73 @@
-name: Build mihomo android-arm64 + ebpf listener (v1.19.32)
+name: Build mihomo android-arm64 + ebpf listener
+
+# Kit eBPF untuk mihomo: listener "ebpf" (local TCP+UDP + shared hotspot),
+# hasil porting datapath library sing-ebpf CHIZI-0618 ke core mihomo resmi.
+#
+# Versi mihomo TIDAK LAGI DIKUNCI: saat Run workflow, pilih dari daftar
+# 20 versi stabil terbaru (input mihomo_version) atau isi versi kustom
+# (input custom_version, mis. 1.20.0-alpha.1) — kustom menang bila diisi.
+# Versi yang dipilih divalidasi di awal: tag v<VERSI> harus ada di
+# MetaCubeX/mihomo, bila tidak ada workflow gagal dengan pesan jelas.
+#
+# Opsi "latest" di daftar = deteksi rilis stabil terbaru SAAT WORKFLOW
+# JALAN (mirip TaptapApp yang cek GitHub tiap dibuka): workflow mencari
+# tag stabil tertinggi lewat git ls-remote, lalu build itu. Catatan:
+# dropdown GitHub Actions tidak bisa dinamis — daftar 20 itu snapshot
+# saat kit dibuat; "latest" yang selalu segar.
+#
+# Repo ini isinya HANYA kit (new-files/, ebpf.patch, apply-ebpf.sh,
+# workflow ini). Source mihomo versi pilihan diambil otomatis dari
+# MetaCubeX/mihomo oleh workflow (checkout ref v<VERSI> ke folder
+# mihomo/), kit dipasang ke sana, lalu dibuild.
+#
+# Cara pakai:
+# 1. Taruh SEMUA isi kit ini di root repo (file .yml ini ke
+#    .github/workflows/), commit & push.
+# 2. Actions -> workflow ini -> Run workflow -> pilih versi (atau isi
+#    versi kustom) -> Run workflow.
+# 3. Download binary dari Artifacts.
+#
+# CATATAN patch: ebpf.patch dibuat terhadap v1.19.32. Versi yang jauh
+# lebih baru bisa GAGAL di langkah "Apply kit eBPF" bila file yang
+# dipatch berubah di upstream — itu sinyal patch perlu di-rebase,
+# bukan bug workflow (apply-ebpf.sh pakai set -e, jadi gagal patch
+# langsung menghentikan run di langkah itu, tidak lolos sampai build).
 
 on:
   workflow_dispatch:
+    inputs:
+      mihomo_version:
+        description: 'Versi core mihomo (latest = deteksi rilis stabil terbaru saat run)'
+        required: true
+        type: choice
+        default: '1.19.33'
+        options:
+          - 'latest'
+          - '1.19.33'
+          - '1.19.32'
+          - '1.19.31'
+          - '1.19.30'
+          - '1.19.29'
+          - '1.19.28'
+          - '1.19.27'
+          - '1.19.26'
+          - '1.19.25'
+          - '1.19.24'
+          - '1.19.23'
+          - '1.19.22'
+          - '1.19.21'
+          - '1.19.20'
+          - '1.19.19'
+          - '1.19.18'
+          - '1.19.17'
+          - '1.19.16'
+          - '1.19.15'
+          - '1.19.14'
+      custom_version:
+        description: 'Versi kustom (kosongkan bila pakai daftar; boleh alpha/beta/rc, tanpa awalan v)'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   build:
@@ -12,11 +78,39 @@ jobs:
         with:
           path: kit
 
-      - name: Checkout mihomo resmi v1.19.32
+      - name: Tentukan + validasi versi mihomo
+        id: ver
+        run: |
+          VER="${{ inputs.custom_version }}"
+          [ -z "$VER" ] && VER="${{ inputs.mihomo_version }}"
+          if [ "$VER" = "latest" ]; then
+            # Deteksi rilis stabil terbaru SAAT RUN: semua tag vX.Y.Z
+            # (tanpa sufiks alpha/beta/rc, tanpa baris peeled ^{}) lalu
+            # ambil yang tertinggi menurut sort versi. Tanpa API/token.
+            VER="$(git ls-remote --tags https://github.com/MetaCubeX/mihomo.git 'v*' | awk '{print $2}' | sed 's|refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+            if [ -z "$VER" ]; then
+              echo "::error::Gagal mendeteksi rilis stabil terbaru dari MetaCubeX/mihomo"
+              exit 1
+            fi
+            echo "Terdeteksi rilis stabil terbaru: $VER"
+          fi
+          VER="${VER#v}"  # terima dengan/tanpa awalan v
+          if ! printf '%s' "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "::error::Format versi tidak valid: '$VER' (contoh: 1.19.33 atau 1.20.0-alpha.1)"
+            exit 1
+          fi
+          if ! git ls-remote --tags --exit-code https://github.com/MetaCubeX/mihomo.git "v$VER" >/dev/null 2>&1; then
+            echo "::error::Tag v$VER tidak ditemukan di MetaCubeX/mihomo — cek lagi versinya"
+            exit 1
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Versi mihomo: $VER (tag v$VER)"
+
+      - name: Checkout mihomo v${{ steps.ver.outputs.version }}
         uses: actions/checkout@v4
         with:
           repository: MetaCubeX/mihomo
-          ref: v1.19.32
+          ref: v${{ steps.ver.outputs.version }}
           path: mihomo
 
       - name: Setup Go 1.25.5
@@ -41,12 +135,12 @@ jobs:
         working-directory: mihomo
         run: |
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -tags with_ebpf -trimpath \
-            -ldflags "-X github.com/metacubex/mihomo/constant.Version=v1.19.32" \
+            -ldflags "-X github.com/metacubex/mihomo/constant.Version=v${{ steps.ver.outputs.version }}" \
             -o mihomo-android-arm64 .
           ls -la mihomo-android-arm64
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mihomo-android-arm64-ebpf-1.19.32
+          name: mihomo-android-arm64-ebpf-${{ steps.ver.outputs.version }}
           path: mihomo/mihomo-android-arm64
