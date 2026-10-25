@@ -1,7 +1,8 @@
-# mihomo-ebpf-cgroup-kit 
+# mihomo-ebpf-cgroup-kit
 
-Kit eBPF untuk **mihomo resmi v1.19.32** (versi dikunci, **tanpa fork** —
-repo ini isinya kit saja, workflow mengambil source resminya sendiri).
+Kit eBPF untuk **mihomo resmi** (versi **bisa dipilih** saat Run workflow,
+**tanpa fork** — repo ini isinya kit saja, workflow mengambil source
+resminya sendiri).
 
 Di v4, eBPF adalah **listener mihomo kelas satu** — padanan persis
 inbound `"ebpf"` di sing-box: terdaftar di parser listener core
@@ -87,20 +88,31 @@ listeners:
 
 ## Build via GitHub Actions (disarankan)
 
-Repo cukup berisi **kit ini saja** — source mihomo v1.19.32 diambil
+Repo cukup berisi **kit ini saja** — source mihomo versi pilihan diambil
 otomatis oleh workflow dari MetaCubeX/mihomo:
 
 1. Taruh **semua isi folder kit ini** di root repo, commit & push.
-2. Tab **Actions** → *Build mihomo android-arm64 + ebpf listener
-   (v1.19.32)* → **Run workflow**.
+2. Tab **Actions** → *Build mihomo android-arm64 + ebpf listener* →
+   **Run workflow** → pilih versi (daftar 20 stabil terbaru, `latest`
+   untuk deteksi rilis stabil terbaru saat run, atau isi versi kustom
+   bila mau alpha/beta/rc) → **Run workflow**.
 3. Ambil binary `mihomo` dari **Artifacts**
-   (`mihomo-android-arm64-ebpf-1.19.32`).
+   (`mihomo-android-arm64-ebpf-<versi>`).
 
-Workflow: checkout source resmi tag `v1.19.32` → apply kit →
+Workflow: tentukan + validasi versi (tag `v<versi>` harus ada di
+MetaCubeX/mihomo, gagal cepat bila tidak ada) → checkout source resmi
+tag `v<versi>` → apply kit →
 `go get github.com/CHIZI-0618/sing-ebpf@v0.1.0-alpha.13` →
 `GOFLAGS=-tags=with_ebpf go mod tidy` → build android/arm64
-`-tags with_ebpf` **tanpa strip**, versi dilabeli `v1.19.32`.
+`-tags with_ebpf` **tanpa strip**, versi dilabeli `v<versi>`.
 Go di-pin **1.25.5** (library sing-ebpf membutuhkannya).
+
+Catatan versi: `ebpf.patch` dibuat terhadap v1.19.32. Versi yang jauh
+lebih baru bisa gagal di langkah "Apply kit eBPF" bila file yang
+dipatch berubah di upstream — itu sinyal patch perlu di-rebase, bukan
+bug workflow (apply-ebpf.sh pakai `set -e`, jadi gagal patch langsung
+menghentikan run di langkah itu). Daftar dropdown adalah snapshot saat
+kit dibuat; opsi `latest` yang selalu segar.
 
 Tanpa tag `with_ebpf`, listener `"ebpf"` tetap terdaftar tapi
 menolak jalan dengan pesan `ebpf: datapath is not included in this
